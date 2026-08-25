@@ -44,16 +44,20 @@ func NewRampService(state *RampState, feed *store.FeedStore, combust *furnace.Co
 }
 
 func (r *RampService) Ramp(furnaceID string, speed float64, feedKG float64) (float64, error) {
-	r.state.SetSpeed(furnaceID, speed)
 	record := store.FeedRecord{
 		FurnaceID: furnaceID,
 		FeedKG:    feedKG,
 		Seq:       r.feed.NextSeq(furnaceID),
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 	}
+	// Persist the feed record BEFORE ramping the grate. If DCS restarts right
+	// after the ramp, Recover() must read the latest feed amount so combustion
+	// air is recomputed from the current feed; ramping before the record is on
+	// disk leaves air based on the previous feed and the chamber overheats.
 	if err := r.feed.Save(record); err != nil {
 		return 0, err
 	}
+	r.state.SetSpeed(furnaceID, speed)
 	air := r.combust.AdjustAir(record)
 	message := fmt.Sprintf("feed %.1f kg persisted before ramp to %.1f", feedKG, speed)
 	if err := r.audit.Record(audit.Event{
