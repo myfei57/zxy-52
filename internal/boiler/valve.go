@@ -53,6 +53,12 @@ func (v *MainValveService) RefreshSetpoint(furnaceID string) (float64, error) {
 	if err != nil {
 		return 0, err
 	}
+	// Load is not enough: the in-memory setpoint may still hold a stale value
+	// from a prior maintenance window. Update the active setpoint so that
+	// subsequent Setpoint() reads reflect the persisted target.
+	v.mu.Lock()
+	v.setpoints[furnaceID] = record.Setpoint
+	v.mu.Unlock()
 	if err := v.audit.Record(audit.Event{
 		FurnaceID: furnaceID,
 		EventType: audit.TypeValveSetpointFresh,

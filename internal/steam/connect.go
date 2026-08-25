@@ -24,7 +24,16 @@ func NewConnectService(valve *boiler.MainValveService, turbine *TurbineService, 
 }
 
 func (c *ConnectService) Connect(furnaceID string) error {
-	setpoint := c.valve.Setpoint(furnaceID)
+	// Pull the latest persisted setpoint before grid connection. During
+	// maintenance operators persist a new target via StoreSetpoint, which
+	// only touches durable storage; the in-memory setpoint can still hold
+	// the stale maintenance value. Refreshing here drives the valve to the
+	// current target instead of the old one, avoiding the steam surge that
+	// trips the generator on connect.
+	setpoint, err := c.valve.RefreshSetpoint(furnaceID)
+	if err != nil {
+		return err
+	}
 	if err := c.valve.SetPosition(furnaceID, setpoint); err != nil {
 		return err
 	}
