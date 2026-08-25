@@ -25,10 +25,11 @@ func HopperID(furnaceID string) string {
 
 func (t *TipService) Tip(furnaceID string, grabID string, loadKG float64) error {
 	hopperID := HopperID(furnaceID)
-	if err := t.hopper.Release(grabID, hopperID, loadKG); err != nil {
+	// 先对位再松斗：料斗对位完成后松开抓斗，避免物料落到料斗外造成地面散料。
+	if err := t.hopper.Align(hopperID); err != nil {
 		return err
 	}
-	if err := t.hopper.Align(hopperID); err != nil {
+	if err := t.hopper.Release(grabID, hopperID, loadKG); err != nil {
 		return err
 	}
 	return t.audit.Record(audit.Event{
