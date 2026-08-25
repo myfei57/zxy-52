@@ -32,6 +32,9 @@ func (q *QuotaService) SetLimit(furnaceID string, limit float64, date string) (s
 }
 
 func (q *QuotaService) Reserve(furnaceID string, kg float64, date string) (bool, error) {
+	// The store performs the load-check-update-persist under one mutex so two
+	// concurrent reservations against the same furnace cannot interleave and
+	// lose a deduction.
 	ok, err := q.quotaStore.Reserve(furnaceID, kg, date)
 	if err != nil {
 		return false, err
@@ -50,20 +53,14 @@ func (q *QuotaService) Reserve(furnaceID string, kg float64, date string) (bool,
 }
 
 func (q *QuotaService) Release(furnaceID string, kg float64, date string) (store.QuotaRecord, error) {
-	record, err := q.quotaStore.Load(furnaceID)
+	// Delegated to the store so the load, roll-over, subtract and persist run
+	// under one critical section — a concurrent Reserve cannot drop this
+	// returned quota by interleaving between a separate Load and Save.
+	record, err := q.quotaStore.Release(furnaceID, kg, date)
 	if err != nil {
 		return record, err
 	}
-	if record.Date != date {
-		record.Date = date
-		record.Used = 0
-	}
-	record.Used -= kg
-	if record.Used < 0 {
-		record.Used = 0
-	}
-	err = q.quotaStore.Save(record)
-	return record, err
+	return record, nil
 }
 
 func (q *QuotaService) Usage(furnaceID string, date string) (store.QuotaRecord, error) {

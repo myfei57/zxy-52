@@ -2,6 +2,7 @@ package store
 
 import (
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -15,6 +16,7 @@ type QuotaRecord struct {
 
 type QuotaStore struct {
 	store *Store
+	mu    sync.Mutex
 	cache map[string]QuotaRecord
 }
 
@@ -30,6 +32,14 @@ func (q *QuotaStore) Path(furnaceID string) string {
 }
 
 func (q *QuotaStore) Save(record QuotaRecord) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.saveLocked(record)
+}
+
+// saveLocked persists record to disk and cache. The caller must hold q.mu so
+// that the read-modify-write sequences in Reserve/Release stay atomic.
+func (q *QuotaStore) saveLocked(record QuotaRecord) error {
 	if err := writeJSON(q.Path(record.FurnaceID), record); err != nil {
 		return err
 	}
@@ -38,6 +48,8 @@ func (q *QuotaStore) Save(record QuotaRecord) error {
 }
 
 func (q *QuotaStore) Load(furnaceID string) (QuotaRecord, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	return q.loadLocked(furnaceID)
 }
 
@@ -53,7 +65,14 @@ func (q *QuotaStore) loadLocked(furnaceID string) (QuotaRecord, error) {
 	return record, nil
 }
 
+// Reserve atomically deducts kg from the daily quota for furnaceID on date.
+// The load, daily roll-over, limit check, update and persist all run under the
+// store mutex, so two feeders reserving concurrently cannot interleave their
+// reads and writes and lose a deduction. A reservation that would exceed the
+// daily limit is rejected without mutating the record.
 func (q *QuotaStore) Reserve(furnaceID string, kg float64, date string) (bool, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
 	record, err := q.loadLocked(furnaceID)
 	if err != nil {
 		record = QuotaRecord{FurnaceID: furnaceID}
@@ -62,17 +81,40 @@ func (q *QuotaStore) Reserve(furnaceID string, kg float64, date string) (bool, e
 		record.Date = date
 		record.Used = 0
 	}
-	time.Sleep(2 * time.Millisecond)
 	if record.Used+kg > record.DailyLimit {
 		return false, nil
 	}
 	record.Used += kg
 	record.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
-	if err := writeJSON(q.Path(furnaceID), record); err != nil {
+	if err := q.saveLocked(record); err != nil {
 		return false, err
 	}
-	q.cache[furnaceID] = record
 	return true, nil
+}
+
+// Release atomically returns kg to the daily quota for furnaceID on date. As
+// with Reserve, the load, roll-over, subtract, clamp and persist run under a
+// single critical section so a concurrent Reserve cannot drop the returned
+// quota on the floor.
+func (q *QuotaStore) Release(furnaceID string, kg float64, date string) (QuotaRecord, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	record, err := q.loadLocked(furnaceID)
+	if err != nil {
+		return record, err
+	}
+	if record.Date != date {
+		record.Date = date
+		record.Used = 0
+	}
+	record.Used -= kg
+	if record.Used < 0 {
+		record.Used = 0
+	}
+	if err := q.saveLocked(record); err != nil {
+		return record, err
+	}
+	return record, nil
 }
 
 func (q *QuotaStore) Seed(furnaceID string, limit float64, date string) (QuotaRecord, error) {
@@ -83,6 +125,8 @@ func (q *QuotaStore) Seed(furnaceID string, limit float64, date string) (QuotaRe
 		Date:       date,
 		UpdatedAt:  time.Now().UTC().Format(time.RFC3339),
 	}
-	err := q.Save(record)
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	err := q.saveLocked(record)
 	return record, err
 }

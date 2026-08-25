@@ -1,0 +1,105 @@
+package store
+
+import (
+	"path/filepath"
+	"sync"
+	"testing"
+)
+
+func TestQuotaStore_ReserveConcurrentDoesNotExceedLimit(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	q := NewQuotaStore(st)
+
+	const furnaceID = "F-1"
+	const date = "2026-08-25"
+	const limit = 1000.0
+	const kg = 600.0 // two reservations would total 1200 > limit
+
+	if _, err := q.Seed(furnaceID, limit, date); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	var ok1, ok2 bool
+	var err1, err2 error
+
+	wg.Add(2)
+	go func() { defer wg.Done(); ok1, err1 = q.Reserve(furnaceID, kg, date) }()
+	go func() { defer wg.Done(); ok2, err2 = q.Reserve(furnaceID, kg, date) }()
+	wg.Wait()
+
+	if err1 != nil || err2 != nil {
+		t.Fatalf("reserve errors: %v %v", err1, err2)
+	}
+	if ok1 && ok2 {
+		t.Fatalf("both reservations succeeded: limit not enforced under concurrency (ok1=%v ok2=%v)", ok1, ok2)
+	}
+	if !ok1 && !ok2 {
+		t.Fatalf("neither reservation succeeded (ok1=%v ok2=%v)", ok1, ok2)
+	}
+
+	record, err := q.Load(furnaceID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if record.Used != kg {
+		t.Fatalf("expected exactly one deduction of %v, got used=%v", kg, record.Used)
+	}
+}
+
+func TestQuotaStore_ReserveConcurrentDoesNotLoseDeduction(t *testing.T) {
+	dir := t.TempDir()
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	q := NewQuotaStore(st)
+
+	const furnaceID = "F-2"
+	const date = "2026-08-25"
+	const limit = 100000.0
+	const kg = 100.0
+	const goroutines = 50
+	const perGoroutine = 20 // each goroutine reserves 20 times => total 1000
+
+	if _, err := q.Seed(furnaceID, limit, date); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < perGoroutine; j++ {
+				if _, err := q.Reserve(furnaceID, kg, date); err != nil {
+					t.Errorf("reserve: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	record, err := q.Load(furnaceID)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	want := float64(goroutines * perGoroutine * kg) // 1000
+	if record.Used != want {
+		t.Fatalf("concurrent deductions lost: want used=%v got used=%v", want, record.Used)
+	}
+
+	// On-disk file must agree with the in-memory cache.
+	var disk QuotaRecord
+	if err := readJSON(filepath.Join(dir, "quota", furnaceID+".json"), &disk); err != nil {
+		t.Fatalf("read disk: %v", err)
+	}
+	if disk.Used != want {
+		t.Fatalf("disk diverged from expected: want=%v got=%v", want, disk.Used)
+	}
+}
