@@ -46,7 +46,10 @@ func (c *CalibStore) Load(furnaceID string) (CalibrationRecord, error) {
 	if len(records) == 0 {
 		return CalibrationRecord{}, os.ErrNotExist
 	}
-	return records[0], nil
+	// Calibration records are append-only, so the most recent calibration is
+	// the last line, not the first. Returning records[0] would re-use a stale
+	// baseline and leave corrections trailing behind the latest calibration.
+	return records[len(records)-1], nil
 }
 
 func (c *CalibStore) NextSeq(furnaceID string) int64 {

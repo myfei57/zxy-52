@@ -32,7 +32,6 @@ func (o *O2Service) Calibrate(furnaceID string, baseline float64) (store.Calibra
 	if err := o.calib.Save(record); err != nil {
 		return record, err
 	}
-	o.baseline = baseline
 	if err := o.audit.Record(audit.Event{
 		FurnaceID: furnaceID,
 		EventType: audit.TypeO2Calibrated,
@@ -44,7 +43,14 @@ func (o *O2Service) Calibrate(furnaceID string, baseline float64) (store.Calibra
 }
 
 func (o *O2Service) Correct(furnaceID string, reading float64) (float64, error) {
-	baseline := o.baseline
+	// Read the latest calibration for THIS furnace so the correction tracks
+	// the most recent baseline. The previous implementation used o.baseline, a
+	// single in-memory float shared across all furnaces that never refreshed
+	// after a process restart or when calibration was written via the store
+	// directly (e.g. the /api/calib/{id}/reset endpoint). After a load change
+	// the correction kept trailing the old baseline, biasing the ammonia dose
+	// and pushing outlet NOx past the emission limit.
+	baseline := o.Baseline(furnaceID)
 	corrected := reading + (baseline-reading)*0.6
 	if err := o.audit.Record(audit.Event{
 		FurnaceID: furnaceID,
